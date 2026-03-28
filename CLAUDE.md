@@ -168,29 +168,132 @@ Beat the naive baseline (1.2244 BPB). Stretch goal: crack the top 10 (< 1.1570 B
 
 ## Current Leaderboard Context (2026-03-28)
 
-- SOTA: 1.1194 BPB (LeakyReLU² + TTT + Parallel Muon)
-- Baseline: 1.2244 BPB
-- Gap: 0.105 BPB across ~20 submissions in 10 days
+**Verified SOTA (merged):** 1.1194 BPB — PR #549 (LeakyReLU² + Legal TTT + Parallel Muon) by abaybektursun
+**Baseline:** 1.2244 BPB
+
+**Unverified PRs (open, not yet merged — check status next session):**
+- PR #1006: claims 1.1085 BPB — JEPA + AdamW TTT + Full Hessian GPTQ (1 seed only, needs 3)
+- PR #999: claims 1.1179 BPB — Entropy-Adaptive TTT epochs (3 seeds, looks solid)
+- PR #831: research paper — all 6 novel architectures tested FAILED at 16MB
+
+**Competition deadline:** April 30, 2026
 
 ## Strategy
 
-Based on research (rules above), our highest-ROI path:
+Based on deep research of all 25+ submissions:
 
-1. **Start from SOTA code** (rule 4) — don't rebuild
-2. **Explore larger vocab** (rule 3) — 8192 BPE is the biggest untapped lever in the SOTA path
-3. **Factored embeddings** to fit larger vocab in 16MB budget
-4. **Keep everything that works** — LeakyReLU², TTT, Parallel Muon, EMA+SWA, XSA, BigramHash, GPTQ-lite
-5. **Ablate each change** (rule 6) — measure before and after
-6. **Never add ms/step without measuring** (rule 1)
+1. **Start from verified SOTA code** (PR #549) — copied to `our_train_gpt.py`
+2. **Add JEPA** (from PR #1006) — auxiliary loss, small parameter cost, DONE in code
+3. **Add Full Hessian GPTQ** (from PR #1006) — replaces GPTQ-lite, 13 seconds
+4. **Add AdamW TTT pre-quantization** (from PR #1006) — SGD fails on CastedLinear
+5. **Ablate each change** one at a time on H100
+
+### What We Investigated and Rejected
+
+**8192 vocab (Rule 3):** Biggest single lever (-0.42 BPB proven by ternary author), BUT:
+- SOTA artifact is 15,990,006 bytes — only 9,994 bytes headroom
+- 8192×512 embedding needs +2.5MB compressed — doesn't fit
+- Factored 8192×128 + 128×512 still needs +440KB — doesn't fit
+- Factored 8192×64 + 64×512 needs +25KB — barely doesn't fit
+- Only works with ternary quantization (4x more compact) — completely different codebase
+- **VERDICT: not viable on the int6/GPTQ path. Would require rebuilding from ternary base.**
+
+### Three Concrete Improvements to Test (from PR #1006)
+
+**1. JEPA (Joint-Embedding Predictive Architecture)**
+- Predicts future hidden states across multiple horizons (1,2,4,8 steps)
+- Uses encoder output → context_encoder → predictor → compare with target_encoder(decoder output)
+- Target encoder updated via EMA (decay=0.996), no gradients
+- VICReg-style variance/covariance regularization prevents collapse
+- Loss weight: 0.12, latent dim: 256
+- Extra params: ~130K (3 LatentProjector modules + span embeddings)
+- **STATUS: Code added to our_train_gpt.py, toggled via JEPA_ENABLED=1**
+
+**2. Full Hessian GPTQ (replaces GPTQ-lite)**
+- Collects H=X^TX via forward hooks during 128-batch calibration
+- Per-column rounding error compensated using inverse Hessian
+- Block size 128, percdamp 0.01
+- Takes 13 seconds — fits in eval budget
+- **STATUS: Not yet implemented in our code. Reference: PR #1006 train_gpt.py**
+
+**3. AdamW TTT Pre-Quantization**
+- Key finding: SGD-based TTT fails on CastedLinear architectures
+- Fix: AdamW with cosine decay on EMA-averaged model BEFORE quantization
+- GPTQ then quantizes the adapted weights
+- **STATUS: Not yet implemented. Reference: PR #1006 train_gpt.py**
+
+### Key Research Findings (PR #831)
+
+**The throughput tax formula:** Any technique must improve BPB by 0.007 per millisecond of step time overhead. At 83ms/step baseline, each 1ms costs ~7 steps, each step ≈ 0.001 BPB.
+
+**All 6 novel architectures failed:**
+| Technique | ms/step impact | BPB | Why failed |
+|-----------|---------------|-----|-----------|
+| MUD Optimizer | +5% | 1.1581 | solve_triangular can't use tensor cores |
+| Info-Max (XSA-all) | +7% | 1.1261 | overhead eats its own gain |
+| Hourglass FFN | +11% | 1.4519 | split weights catastrophic for int6 |
+| nGPT Hypersphere | +47% | 1.6915 | unit-norm incompatible with int6 |
+| TrigramHash | +18% | 1.1298 | hash overhead > trigram benefit |
+| SSM Hybrid | +240% | 1.2516 | breaks torch.compile |
+
+**Takeaway:** The SOTA stack is co-optimized (Parallel Muon + torch.compile + int6 + tensor cores). Breaking any pillar cascades. JEPA is one of the few additions that doesn't break this co-optimization because it's only active during training (no eval cost).
+
+## Codebase Layout
+
+```
+parameter-golf/
+├── CLAUDE.md              ← this file (project rules + context)
+├── experiments.md         ← experiment log (track all runs)
+├── our_train_gpt.py       ← OUR working code (SOTA + JEPA added)
+├── train_gpt.py           ← baseline from OpenAI (9L, 1.2244 BPB)
+├── train_gpt_mlx.py       ← MLX version for Mac testing
+├── data/
+│   ├── datasets/fineweb10B_sp1024/  ← downloaded (1 shard + val)
+│   └── tokenizers/                   ← BPE tokenizer (1024 vocab)
+├── records/
+│   ├── track_10min_16mb/            ← all leaderboard submissions
+│   └── track_non_record_16mb/       ← unlimited compute / research
+└── .venv/                            ← Python venv (MLX + deps)
+```
+
+## Environment Setup
+
+**Local (Mac M1):**
+```bash
+cd ~/office_projects/parameter-golf
+source .venv/bin/activate
+# Smoke test:
+RUN_ID=mlx_smoke ITERATIONS=50 TRAIN_BATCH_TOKENS=8192 VAL_LOSS_EVERY=0 VAL_BATCH_SIZE=8192 python3 train_gpt_mlx.py
+```
+MLX venv has: mlx, mlx-lm, numpy, sentencepiece, huggingface-hub, datasets, tqdm
+
+**RunPod (H100) — when credits arrive:**
+```bash
+# Use official template: https://console.runpod.io/deploy?template=y5cejece4j&ref=nl2r56th
+cd /workspace && git clone https://github.com/eamon831/parameter-golf.git && cd parameter-golf
+python3 data/cached_challenge_fineweb.py --variant sp1024
+# Run SOTA baseline (Experiment 0):
+SEED=1337 RUN_ID=exp0_reproduce torchrun --standalone --nproc_per_node=8 records/track_10min_16mb/2026-03-23_LeakyReLU_LegalTTT_ParallelMuon/train_gpt.py
+# Run our code with JEPA (Experiment 1):
+SEED=1337 JEPA_ENABLED=1 RUN_ID=exp1_jepa torchrun --standalone --nproc_per_node=8 our_train_gpt.py
+```
+
+## Blockers
+
+- **RunPod credits:** Applied 2026-03-28, approval in 1-2 business days. Quick-start tier (~$25 / ~8 compute hours). Can also use Saiful's existing RunPod account.
+- **MLX validation is slow:** ~20min for full val on Mac. Training is fine for directional testing.
+- **our_train_gpt.py requires CUDA + flash_attn_interface:** Cannot test locally. MLX script is separate.
+
+## Git Remotes
+
+- `origin` → `eamon831/parameter-golf` (our fork — push here)
+- `upstream` → `openai/parameter-golf` (submit PRs here)
+- GitHub auth: `eamon831` account via keyring
 
 ## Workflow
 
-- Develop locally, don't push until ready
-- Test on Mac (MLX) for quick iteration on architecture changes
-- Run real benchmarks on RunPod (H100) for timing + BPB
-- Submit PR to openai/parameter-golf when competitive
-
-## Remotes
-
-- `origin` → eamon831/parameter-golf (fork)
-- `upstream` → openai/parameter-golf (submit PRs here)
+1. `git fetch upstream` before every session — check new submissions
+2. Develop in `our_train_gpt.py` — test on RunPod
+3. Log every experiment in `experiments.md`
+4. When competitive: create submission folder in `records/`, PR to upstream
+5. Don't push to upstream until we have 3-seed results with p<0.01
