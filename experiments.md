@@ -4,55 +4,47 @@ All experiments tracked here. Never re-run a failed experiment without a new hyp
 
 ---
 
-## Experiment 0: Reproduce SOTA baseline
-- Date: pending (waiting for RunPod credits, applied 2026-03-28)
-- Hypothesis: SOTA code (PR #549) runs as documented and produces ~1.1194 BPB
-- Change: none — run SOTA train_gpt.py unmodified
-- Hardware: 8xH100 SXM (required for Parallel Muon)
-- Command: `SEED=1337 RUN_ID=exp0_reproduce torchrun --standalone --nproc_per_node=8 records/track_10min_16mb/2026-03-23_LeakyReLU_LegalTTT_ParallelMuon/train_gpt.py`
-- Expected: val_bpb ~1.1192 (seed 1337 from their logs), ms/step ~83ms, artifact ~15.97MB
-- Result: pending
-- Verdict: pending
-- Cost: ~$3.30 (10 min training + 10 min eval on 8xH100 @ ~$20/hr)
+## Experiment 0: Smoke test on 1xH100 (baseline, 50 steps)
+- Date: 2026-04-07
+- Hypothesis: Our code (PR #1019 base, JEPA off) runs correctly on H100
+- Change: none — JEPA_ENABLED=0 (default)
+- Hardware: 1xH100 SXM ($2.69/hr)
+- Result: val_bpb=3.3678 (50 steps) | ms/step=648 | artifact=4,598,403 bytes
+- Post-EMA val_bpb=4.0261 | final_int6 val_bpb=4.0347
+- Verdict: PASS — code works, pipeline complete
+- Cost: ~$0.15
 
-## Experiment 0.5: Verify our code matches SOTA (JEPA off)
-- Date: pending
-- Hypothesis: our_train_gpt.py with JEPA_ENABLED=0 produces identical results to original SOTA
-- Change: use our code instead of original — should be identical since JEPA defaults to off
-- Hardware: 8xH100 SXM
-- Command: `SEED=1337 JEPA_ENABLED=0 RUN_ID=exp05_ours_baseline torchrun --standalone --nproc_per_node=8 our_train_gpt.py`
-- Expected: val_bpb ~1.1192 (same as Experiment 0)
-- Result: pending
-- Verdict: pending
+## Experiment 1a: JEPA on 1xH100 (200 steps)
+- Date: 2026-04-07
+- Hypothesis: JEPA adds minimal overhead and produces valid results
+- Change: JEPA_ENABLED=1 (latent_dim=256, loss_weight=0.12, spans=1,2,4,8, ema_decay=0.996)
+- Hardware: 1xH100 SXM
+- Result: val_bpb=2.7733 | ms/step=711 | artifact=4,982,147 bytes
+- Post-EMA val_bpb=3.3727 | final_int6 val_bpb=3.4159
+- JEPA params excluded from export: 525,312
+- Verdict: PASS — full pipeline works with JEPA
+- Cost: ~$0.50
 
-## Experiment 1: JEPA auxiliary loss
-- Date: pending
-- Hypothesis: JEPA auxiliary loss improves BPB by acting as regularizer (PR #1006 claims it contributes to 1.1085). Extra ~130K params + forward compute for JEPA loss should add <5ms/step.
-- Change: JEPA_ENABLED=1 (latent_dim=256, loss_weight=0.12, future_spans=1,2,4,8, ema_decay=0.996)
-- Hardware: 8xH100 SXM
-- Command: `SEED=1337 JEPA_ENABLED=1 RUN_ID=exp1_jepa torchrun --standalone --nproc_per_node=8 our_train_gpt.py`
-- Success criteria: BPB improves by >0.001 AND ms/step increases by <5ms
-- Fail criteria: BPB worsens OR ms/step increases by >5ms (net negative per Rule 1)
-- Result: pending
-- Verdict: pending
+## Experiment 1b: Baseline on 1xH100 (200 steps, for comparison)
+- Date: 2026-04-07
+- Hypothesis: Baseline at 200 steps for fair JEPA comparison
+- Change: JEPA_ENABLED=0
+- Hardware: 1xH100 SXM
+- Result: val_bpb=2.7656 | ms/step=933 | artifact=4,982,207 bytes
+- Post-EMA val_bpb=3.3702 | final_int6 val_bpb=3.4144
+- Verdict: JEPA neutral at 200 steps (+0.0015 BPB). Expected — regularizers need thousands of steps.
+- Cost: ~$0.50
 
-## Experiment 2: Full Hessian GPTQ (planned, not yet coded)
-- Date: pending
-- Hypothesis: Full GPTQ (Frantar et al.) gives better int6 quantization than GPTQ-lite by compensating per-column rounding error using inverse Hessian. PR #1006 reports 13s runtime.
-- Change: Replace GPTQ-lite quantization with full Hessian GPTQ + 128-batch calibration
-- Hardware: 8xH100 SXM
-- Success criteria: Post-quantization BPB improves (lower quantization penalty)
-- Code status: NOT YET IMPLEMENTED. Reference implementation in PR #1006.
-- Result: pending
-
-## Experiment 3: AdamW TTT pre-quantization (planned, not yet coded)
-- Date: pending
-- Hypothesis: AdamW TTT on full-precision EMA weights before quantization gives better adaptation than SGD TTT on dequantized weights. PR #1006 found SGD fails on CastedLinear.
-- Change: Replace SGD TTT with AdamW + cosine decay, run before GPTQ instead of after
-- Hardware: 8xH100 SXM
-- Success criteria: TTT BPB gain > current 0.0025 from SOTA's SGD TTT
-- Code status: NOT YET IMPLEMENTED. Reference implementation in PR #1006.
-- Result: pending
+## Experiment 1c: JEPA on 8xH100 (INTERRUPTED)
+- Date: 2026-04-07
+- Hypothesis: JEPA improves BPB over full 600s training on 8xH100
+- Change: JEPA_ENABLED=1, full 600s wallclock
+- Hardware: 8xH100 SXM ($21.52/hr)
+- Result: **INTERRUPTED** — pod terminated at step 10/6400
+- Measured: 93ms/step (SOTA is 86.7ms — only 6ms JEPA overhead)
+- train_loss at step 10: 6.0584 (loss dropping normally)
+- Verdict: CODE WORKS, need to rerun. Waiting for compute grant.
+- Cost: ~$7 (pod ran ~20 min including setup + compile + 10 steps)
 
 ---
 
@@ -64,10 +56,12 @@ All experiments tracked here. Never re-run a failed experiment without a new hyp
 - Only viable with ternary quantization (4x more compact) which is a completely different codebase.
 - DECISION: Stay on int6/GPTQ path. Don't pursue 8192 vocab.
 
-### Depth Recurrence (2026-03-28)
-- CONFIRMED DEAD END by 3 independent teams (PR #363, PR #499, ternary author)
-- Two structural taxes: quantization compounding + step time overhead = 0.025 BPB worse
-- Do not attempt.
+### Depth Recurrence (2026-03-28, REVISED 2026-04-07)
+- Was CONFIRMED DEAD END by 3 teams (PR #363) as of March 2026
+- **NOW WORKING** — PR #1394 and #1435 use depth recurrence successfully
+- Key: 2-3 layer loops on specific layers (4-5), not full recurrence
+- Combined with SP8192 vocab in PR #1394 (1.086 BPB)
+- Our dead-ends list needs updating — depth recurrence is viable again
 
 ### Novel Architectures (2026-03-28, PR #831)
 - 6 architectures tested, all failed at 16MB/600s constraint

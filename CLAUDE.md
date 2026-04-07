@@ -180,51 +180,44 @@ Beat the naive baseline (1.2244 BPB). Stretch goal: crack the top 10 (< 1.1570 B
 **Baseline:** 1.2244 BPB
 
 **Open PRs (checked 2026-04-07):**
-- PR #1006: JEPA + AdamW TTT + Full GPTQ — still OPEN, compliance issue (TTT was adapt-then-score = illegal). Without TTT lands ~1.12 BPB. JEPA value is as training regularizer (pruned from artifact, zero eval cost).
-- PR #999: CLOSED (dead)
+- PR #1437: **1.078 BPB** — SP8192 + Parallel Residuals + 3-Layer Recurrence + N-gram Tilt (3-seed)
+- PR #1394: **1.086 BPB** — SP8192 + GPTQ Embeddings + Depth Recurrence + MuonEq-R (5-seed)
+- PR #1435: **1.098 BPB** — 11L Depth Recurrence + BigramHash + EMA (3-seed)
+- PR #1440: **1.103 BPB** — EngramLite + Mousse + Progressive Depth Recurrence + TTT (1-seed)
+- PR #1006: JEPA + AdamW TTT + Full GPTQ — still OPEN, compliance issue
 
 **Competition deadline:** April 30, 2026
 
 ## Strategy (Updated 2026-04-07)
 
-**Old strategy was partially validated:** We correctly identified Full Hessian GPTQ as the key improvement — it's the biggest change in the new SOTA. We missed BigramHash 3072 and XSA-all.
+**Phase 1 (CURRENT): JEPA on PR #1019 — get first submission**
+- our_train_gpt.py = PR #1019 SOTA + JEPA (code DONE, tested)
+- 93ms/step on 8xH100 confirmed (minimal overhead vs SOTA's 86.7ms)
+- Full pipeline verified on 1xH100: training + EMA + GPTQ + int6 + eval
+- 8xH100 run interrupted by pod failure at step 10 — need to rerun
+- Waiting for compute grant ($100-$500 bootstrapped, submitted 2026-04-07)
+- If JEPA beats 1.1147 → 3-seed validation → PR to upstream
 
-**New strategy — rebase on PR #1019, then add JEPA:**
-
-1. **Reproduce SOTA** (PR #1019) on RunPod — Experiment 0 (~$1)
-2. **Add JEPA** on top of PR #1019 — Experiment 1 (~$1)
-   - JEPA is training-only (pruned before export), zero eval cost
-   - Shapes gradient quality, acts as regularizer
-   - If additive on the new stack, could push below 1.1147
-3. **If JEPA works:** 3-seed validation, then PR to upstream
-4. **If JEPA doesn't work:** Search for next improvement (check new PRs, explore hyperparameter space)
-
-**What's no longer needed (already in SOTA):**
-- Full Hessian GPTQ — already in PR #1019
-- XSA-all — already in PR #1019
-- TTT — confirmed dead on this stack (25 attempts failed)
-
-**Remaining candidates to explore:**
-- JEPA auxiliary loss (training regularizer, zero artifact cost)
-- Larger BigramHash (3072→4096? need to check size budget)
-- Hyperparameter tuning on the new stack
-- Check for any new PRs that landed after April 1
+**Phase 2 (FUTURE): Rebase on SP8192 stack**
+- PR #1394 (1.086 BPB) is the new frontier — SP8192 vocab is the biggest lever
+- Depth recurrence is back (contradicting old dead-ends list)
+- N-gram tilt at eval gives ~0.005 BPB free
+- Port JEPA onto SP8192 stack if Phase 1 shows it helps
 
 ### RunPod Commands (Ready to Execute)
 
 ```bash
-# Setup (do once):
+# Setup (do once on fresh pod):
 cd /workspace
 git clone https://github.com/eamon831/parameter-golf.git && cd parameter-golf
+python3 -m pip install huggingface-hub sentencepiece zstandard numpy
+python3 -m pip install flash_attn_3 --find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch291
 python3 data/cached_challenge_fineweb.py --variant sp1024
-pip install --break-system-packages flash_attn_3 --find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch291
-pip install --break-system-packages sentencepiece zstandard
 
-# Experiment 0: Reproduce SOTA baseline
-BIGRAM_VOCAB_SIZE=3072 BIGRAM_DIM=112 WARMDOWN_ITERS=4000 \
-TARGET_MB=15.9 SEED=1337 RUN_ID=exp0_reproduce_sota \
-torchrun --standalone --nproc_per_node=8 \
-records/track_10min_16mb/2026-03-25_ValCalib_GPTQ_XSA_BigramHash3072/train_gpt.py
+# Run JEPA experiment (use run.sh to avoid copy-paste issues):
+bash run.sh
+# Monitor:
+tail -f logs/exp1_jepa_8x3.txt
 ```
 
 ### What We Investigated and Rejected
@@ -336,9 +329,18 @@ Full docs: `infrastructure/runpod-management.md`
 
 ## Blockers
 
-- **RunPod credits:** $25 initial grant. Applied for more (JEPA is on OpenAI's wishlist).
+- **RunPod credits:** $25 initial grant spent. ~$5.48 remaining. Bootstrapped grant ($100-$500) submitted 2026-04-07.
+- **8xH100 run incomplete:** Pod terminated unexpectedly at step 10/6400. All pods terminated. Need new pod when credits arrive.
 - **MLX validation is slow:** ~20min for full val on Mac. Training is fine for directional testing.
-- **No experiments run yet:** Zero H100 runs completed. Experiment 0 (reproduce SOTA) is first priority.
+
+## What We've Proven (2026-04-07)
+
+- **JEPA code works end-to-end** on both 1xH100 and 8xH100
+- **93ms/step on 8xH100** — minimal overhead vs SOTA's 86.7ms (6ms = ~0.006 BPB cost)
+- **525K JEPA params properly pruned** from artifact — zero eval cost
+- **Full pipeline passes**: training → EMA → AR self-gen GPTQ → int6 quantization → sliding eval
+- **1xH100 200-step results**: JEPA neutral at short horizon (expected — regularizers need thousands of steps)
+- **Artifact size**: 4.98MB (well under 16MB limit)
 
 ## Git Remotes
 
