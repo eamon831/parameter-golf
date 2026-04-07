@@ -166,61 +166,75 @@ Beat the naive baseline (1.2244 BPB). Stretch goal: crack the top 10 (< 1.1570 B
 - No accessing validation data during training
 - No external downloads during eval
 
-## Current Leaderboard Context (2026-03-28)
+## Current Leaderboard Context (2026-04-07)
 
-**Verified SOTA (merged):** 1.1194 BPB — PR #549 (LeakyReLU² + Legal TTT + Parallel Muon) by abaybektursun
+**Verified SOTA (merged 2026-03-30):** 1.1147 BPB — PR #1019 by abaybektursun
+- AR Self-Generated Full Hessian GPTQ (model generates own calibration data — fully legal)
+- BigramHash 3072×112 (up from 1536)
+- XSA on all 11 layers (up from last 4)
+- Dropped TTT (25 failed attempts on this stack — neutral/negative)
+- ~86.7 ms/step, 3-seed std 0.0004
+- Code: `records/track_10min_16mb/2026-03-25_ValCalib_GPTQ_XSA_BigramHash3072/train_gpt.py`
+
+**Previous SOTA:** 1.1194 BPB — PR #549 (our old base code)
 **Baseline:** 1.2244 BPB
 
-**Unverified PRs (open, not yet merged — check status next session):**
-- PR #1006: claims 1.1085 BPB — JEPA + AdamW TTT + Full Hessian GPTQ (1 seed only, needs 3)
-- PR #999: claims 1.1179 BPB — Entropy-Adaptive TTT epochs (3 seeds, looks solid)
-- PR #831: research paper — all 6 novel architectures tested FAILED at 16MB
+**Open PRs (checked 2026-04-07):**
+- PR #1006: JEPA + AdamW TTT + Full GPTQ — still OPEN, compliance issue (TTT was adapt-then-score = illegal). Without TTT lands ~1.12 BPB. JEPA value is as training regularizer (pruned from artifact, zero eval cost).
+- PR #999: CLOSED (dead)
 
 **Competition deadline:** April 30, 2026
 
-## Strategy
+## Strategy (Updated 2026-04-07)
 
-Based on deep research of all 25+ submissions:
+**Old strategy was partially validated:** We correctly identified Full Hessian GPTQ as the key improvement — it's the biggest change in the new SOTA. We missed BigramHash 3072 and XSA-all.
 
-1. **Start from verified SOTA code** (PR #549) — copied to `our_train_gpt.py`
-2. **Add JEPA** (from PR #1006) — auxiliary loss, small parameter cost, DONE in code
-3. **Add Full Hessian GPTQ** (from PR #1006) — replaces GPTQ-lite, 13 seconds
-4. **Add AdamW TTT pre-quantization** (from PR #1006) — SGD fails on CastedLinear
-5. **Ablate each change** one at a time on H100
+**New strategy — rebase on PR #1019, then add JEPA:**
+
+1. **Reproduce SOTA** (PR #1019) on RunPod — Experiment 0 (~$1)
+2. **Add JEPA** on top of PR #1019 — Experiment 1 (~$1)
+   - JEPA is training-only (pruned before export), zero eval cost
+   - Shapes gradient quality, acts as regularizer
+   - If additive on the new stack, could push below 1.1147
+3. **If JEPA works:** 3-seed validation, then PR to upstream
+4. **If JEPA doesn't work:** Search for next improvement (check new PRs, explore hyperparameter space)
+
+**What's no longer needed (already in SOTA):**
+- Full Hessian GPTQ — already in PR #1019
+- XSA-all — already in PR #1019
+- TTT — confirmed dead on this stack (25 attempts failed)
+
+**Remaining candidates to explore:**
+- JEPA auxiliary loss (training regularizer, zero artifact cost)
+- Larger BigramHash (3072→4096? need to check size budget)
+- Hyperparameter tuning on the new stack
+- Check for any new PRs that landed after April 1
+
+### RunPod Commands (Ready to Execute)
+
+```bash
+# Setup (do once):
+cd /workspace
+git clone https://github.com/eamon831/parameter-golf.git && cd parameter-golf
+python3 data/cached_challenge_fineweb.py --variant sp1024
+pip install --break-system-packages flash_attn_3 --find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch291
+pip install --break-system-packages sentencepiece zstandard
+
+# Experiment 0: Reproduce SOTA baseline
+BIGRAM_VOCAB_SIZE=3072 BIGRAM_DIM=112 WARMDOWN_ITERS=4000 \
+TARGET_MB=15.9 SEED=1337 RUN_ID=exp0_reproduce_sota \
+torchrun --standalone --nproc_per_node=8 \
+records/track_10min_16mb/2026-03-25_ValCalib_GPTQ_XSA_BigramHash3072/train_gpt.py
+```
 
 ### What We Investigated and Rejected
 
 **8192 vocab (Rule 3):** Biggest single lever (-0.42 BPB proven by ternary author), BUT:
 - SOTA artifact is 15,990,006 bytes — only 9,994 bytes headroom
-- 8192×512 embedding needs +2.5MB compressed — doesn't fit
-- Factored 8192×128 + 128×512 still needs +440KB — doesn't fit
-- Factored 8192×64 + 64×512 needs +25KB — barely doesn't fit
 - Only works with ternary quantization (4x more compact) — completely different codebase
 - **VERDICT: not viable on the int6/GPTQ path. Would require rebuilding from ternary base.**
 
-### Three Concrete Improvements to Test (from PR #1006)
-
-**1. JEPA (Joint-Embedding Predictive Architecture)**
-- Predicts future hidden states across multiple horizons (1,2,4,8 steps)
-- Uses encoder output → context_encoder → predictor → compare with target_encoder(decoder output)
-- Target encoder updated via EMA (decay=0.996), no gradients
-- VICReg-style variance/covariance regularization prevents collapse
-- Loss weight: 0.12, latent dim: 256
-- Extra params: ~130K (3 LatentProjector modules + span embeddings)
-- **STATUS: Code added to our_train_gpt.py, toggled via JEPA_ENABLED=1**
-
-**2. Full Hessian GPTQ (replaces GPTQ-lite)**
-- Collects H=X^TX via forward hooks during 128-batch calibration
-- Per-column rounding error compensated using inverse Hessian
-- Block size 128, percdamp 0.01
-- Takes 13 seconds — fits in eval budget
-- **STATUS: Not yet implemented in our code. Reference: PR #1006 train_gpt.py**
-
-**3. AdamW TTT Pre-Quantization**
-- Key finding: SGD-based TTT fails on CastedLinear architectures
-- Fix: AdamW with cosine decay on EMA-averaged model BEFORE quantization
-- GPTQ then quantizes the adapted weights
-- **STATUS: Not yet implemented. Reference: PR #1006 train_gpt.py**
+**AdamW TTT:** Planned from PR #1006, but TTT is confirmed dead on the current SOTA stack (25 failed attempts by the SOTA author himself). Dropped.
 
 ### Key Research Findings (PR #831)
 
@@ -280,9 +294,10 @@ SEED=1337 JEPA_ENABLED=1 RUN_ID=exp1_jepa torchrun --standalone --nproc_per_node
 
 ## Blockers
 
-- **RunPod credits:** Applied 2026-03-28, approval in 1-2 business days. Quick-start tier (~$25 / ~8 compute hours). Can also use Saiful's existing RunPod account.
+- **RunPod credits:** APPROVED — Saiful has an active RunPod account with credits. Need SSH access details to run experiments remotely.
 - **MLX validation is slow:** ~20min for full val on Mac. Training is fine for directional testing.
-- **our_train_gpt.py requires CUDA + flash_attn_interface:** Cannot test locally. MLX script is separate.
+- **our_train_gpt.py is outdated:** Built on PR #549. Need to port JEPA onto PR #1019 codebase before Experiment 1.
+- **No experiments run yet:** Zero H100 runs completed. Experiment 0 (reproduce SOTA) is first priority.
 
 ## Git Remotes
 
