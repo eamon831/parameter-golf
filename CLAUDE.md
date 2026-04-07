@@ -258,9 +258,12 @@ records/track_10min_16mb/2026-03-25_ValCalib_GPTQ_XSA_BigramHash3072/train_gpt.p
 parameter-golf/
 ├── CLAUDE.md              ← this file (project rules + context)
 ├── experiments.md         ← experiment log (track all runs)
-├── our_train_gpt.py       ← OUR working code (SOTA + JEPA added)
+├── our_train_gpt.py       ← OUR working code (PR #1019 SOTA + JEPA)
+├── runpod.sh              ← RunPod pod management helper
 ├── train_gpt.py           ← baseline from OpenAI (9L, 1.2244 BPB)
 ├── train_gpt_mlx.py       ← MLX version for Mac testing
+├── infrastructure/
+│   └── runpod-management.md  ← RunPod API docs & cost rules
 ├── data/
 │   ├── datasets/fineweb10B_sp1024/  ← downloaded (1 shard + val)
 │   └── tokenizers/                   ← BPE tokenizer (1024 vocab)
@@ -281,22 +284,60 @@ RUN_ID=mlx_smoke ITERATIONS=50 TRAIN_BATCH_TOKENS=8192 VAL_LOSS_EVERY=0 VAL_BATC
 ```
 MLX venv has: mlx, mlx-lm, numpy, sentencepiece, huggingface-hub, datasets, tqdm
 
-**RunPod (H100) — when credits arrive:**
+**RunPod (H100) — $25 initial grant:**
+
+Pod management via REST API or helper script:
 ```bash
-# Use official template: https://console.runpod.io/deploy?template=y5cejece4j&ref=nl2r56th
-cd /workspace && git clone https://github.com/eamon831/parameter-golf.git && cd parameter-golf
-python3 data/cached_challenge_fineweb.py --variant sp1024
-# Run SOTA baseline (Experiment 0):
-SEED=1337 RUN_ID=exp0_reproduce torchrun --standalone --nproc_per_node=8 records/track_10min_16mb/2026-03-23_LeakyReLU_LegalTTT_ParallelMuon/train_gpt.py
-# Run our code with JEPA (Experiment 1):
-SEED=1337 JEPA_ENABLED=1 RUN_ID=exp1_jepa torchrun --standalone --nproc_per_node=8 our_train_gpt.py
+# Helper script (from repo root):
+./runpod.sh list          # List all pods
+./runpod.sh create-1x     # Create 1xH100 (~$2.50/hr, for testing)
+./runpod.sh create-8x     # Create 8xH100 (~$20/hr, for validation)
+./runpod.sh start          # Start stopped pod
+./runpod.sh stop           # STOP pod (billing pauses, /workspace persists)
+./runpod.sh status         # Check pod state
+./runpod.sh billing        # Check spend
+
+# After creating a pod, save the ID:
+export RUNPOD_POD_ID=<id>
 ```
+
+First-time pod setup (run once, persists across stop/start):
+```bash
+cd /workspace
+git clone https://github.com/eamon831/parameter-golf.git && cd parameter-golf
+python3 data/cached_challenge_fineweb.py --variant sp1024
+pip install --break-system-packages flash_attn_3 --find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch291
+pip install --break-system-packages sentencepiece zstandard
+```
+
+Running experiments:
+```bash
+# Experiment 0: Reproduce SOTA baseline (no JEPA)
+BIGRAM_VOCAB_SIZE=3072 BIGRAM_DIM=112 WARMDOWN_ITERS=4000 \
+TARGET_MB=15.9 SEED=1337 RUN_ID=exp0_baseline \
+torchrun --standalone --nproc_per_node=8 our_train_gpt.py
+
+# Experiment 1: JEPA enabled
+BIGRAM_VOCAB_SIZE=3072 BIGRAM_DIM=112 WARMDOWN_ITERS=4000 \
+TARGET_MB=15.9 SEED=1337 RUN_ID=exp1_jepa JEPA_ENABLED=1 \
+torchrun --standalone --nproc_per_node=8 our_train_gpt.py
+
+# IMMEDIATELY after experiment finishes:
+./runpod.sh stop
+```
+
+**COST RULES:**
+- 1xH100 = ~$0.42 per 10-min run (use for directional testing)
+- 8xH100 = ~$3.33 per 10-min run (use for final validation)
+- $25 = ~60 runs on 1xH100 or ~7 runs on 8xH100
+- ALWAYS stop pod after experiment. A forgotten 8xH100 running 1hr = $20 wasted = 6 experiments gone.
+
+Full docs: `infrastructure/runpod-management.md`
 
 ## Blockers
 
-- **RunPod credits:** APPROVED — Saiful has an active RunPod account with credits. Need SSH access details to run experiments remotely.
+- **RunPod credits:** $25 initial grant. Applied for more (JEPA is on OpenAI's wishlist).
 - **MLX validation is slow:** ~20min for full val on Mac. Training is fine for directional testing.
-- **our_train_gpt.py is outdated:** Built on PR #549. Need to port JEPA onto PR #1019 codebase before Experiment 1.
 - **No experiments run yet:** Zero H100 runs completed. Experiment 0 (reproduce SOTA) is first priority.
 
 ## Git Remotes
